@@ -1,10 +1,10 @@
-name: Combine and Check M3U Playlists
+name: Run Duda Extractor and Save M3U
 
 on:
   schedule:
     # Berjalan otomatis setiap jam pada menit ke-42
     - cron: "42 * * * *"
-  # Memungkinkan pemicu manual dari tab Actions di GitHub
+  # Pemicu manual dari tab Actions
   workflow_dispatch:
 
 permissions:
@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -24,42 +24,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system deps + Python packages
+      - name: Install Python dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          pip install requests yt-dlp playwright curl_cffi
-          playwright install --with-deps chromium
+          python -m pip install --upgrade pip
+          pip install requests
 
       # ============================================================
-      # TAHAP EKSTRAKSI STREAM
+      # JALANKAN DUDA.PY
       # ============================================================
-      - name: Extract DAMITV streams
+      - name: Run duda.py
         run: python duda.py
-        continue-on-error: true
-
-      # ============================================================
-      # PENGGABUNGAN DAN PENGECEKAN KUALITAS STREAM
-      # ============================================================
-      - name: Run combiner
-        run: python combine_playlist.py
-
-      - name: Check streams
-        run: python check_playlist.py
-        continue-on-error: true
 
       # ============================================================
       # COMMIT & PUSH HASIL KE REPOSITORI
       # ============================================================
-      - name: Commit and push
+      - name: Commit and push generated M3U
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Update combined and checked playlists"
-          file_pattern: >-
-            combined_events.m3u
-            combined_events_checked.m3u
-            flussi_non_funzionanti.txt
-            damitv_events.m3u
-            daddylive_streams.m3u
-            cdnlivetv_channels.m3u
-            cdnlivetv_events.m3u
+          commit_message: "Update M3U playlist from duda.py"
+          # Pola '*.m3u' otomatis melacak file .m3u apa pun yang dihasilkan script
+          file_pattern: "*.m3u"
