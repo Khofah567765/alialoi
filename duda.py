@@ -1,16 +1,21 @@
+#!/usr/bin/env python3
 # ================================================================
-# CDN Live TV - Extractor v3 (Soccer only + anti rate-limit)
-# Estrae canali TV (414) + eventi calcio dall'API cdnlivetv.is
+# duda.py - CDN Live TV Extractor (Soccer only + Composite Thumbnails)
 # ================================================================
 
-import requests
+import os
+import io
 import re
 import base64
-import urllib3
 import time
 import random
 import unicodedata
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
+import urllib3
+from PIL import Image, ImageDraw
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -20,9 +25,13 @@ API_EVENTS = "https://api.cdnlivetv.is/api/v1/events/sports/?user=cdnlivetv&plan
 
 CHANNELS_OUTPUT = "cdnlivetv_channels.m3u"
 EVENTS_OUTPUT = "cdnlivetv_events.m3u"
+THUMBNAILS_DIR = "thumbnails"
+
+# Deteksi username/repo otomatis dari environment GitHub Actions
+GITHUB_REPO = os.getenv("GITHUB_REPOSITORY", "")
 
 # --- SOLO CALCIO ---
-ONLY_SPORT = "Soccer"          # None = tutti gli sport
+ONLY_SPORT = "Soccer"  # None = semua cabang olahraga
 
 # --- ANTI RATE-LIMIT ---
 MAX_WORKERS = 3
@@ -30,7 +39,7 @@ TIMEOUT = 20
 RETRIES = 4
 JITTER_MIN = 0.5
 JITTER_MAX = 1.2
-PAUSE_BETWEEN_PHASES = 45
+PAUSE_BETWEEN_PHASES = 10
 BACKOFF_BASE = 3
 
 MAX_CHANNELS = 0
@@ -47,10 +56,11 @@ HEADERS = {
 }
 
 _resolve_cache: dict = {}
+os.makedirs(THUMBNAILS_DIR, exist_ok=True)
 
 
 # ================================================================
-# UTILITY
+# UTILITY & THUMBNAIL GENERATOR
 # ================================================================
 def b64d(s: str) -> bytes:
     s = s.replace("-", "+").replace("_", "/")
@@ -80,6 +90,69 @@ def normalize_event_name(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
 
 
+def download_image(url: str) -> Image.Image | None:
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8, verify=False)
+        if r.status_code == 200:
+            return Image.open(io.BytesIO(r.content)).convert("RGBA")
+    except Exception:
+        pass
+    return None
+
+
+def create_match_thumbnail(home_logo_url: str, away_logo_url: str, league_logo_url: str, match_id: str) -> str:
+    safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(match_id))[:40]
+    filename = f"{safe_id}.png"
+    local_path = os.path.join(THUMBNAILS_DIR, filename)
+
+    if os.path.exists(local_path):
+        return local_path
+
+    # Resolusi dasar HD 16:9
+    width, height = 1280, 720
+    canvas = Image.new("RGBA", (width, height), (15, 23, 42, 255))
+    draw = ImageDraw.Draw(canvas)
+
+    # 1. Elemen tengah VS
+    center_x, center_y = width // 2, height // 2 + 25
+    radius = 50
+    draw.ellipse(
+        [center_x - radius, center_y - radius, center_x + radius, center_y + radius],
+        fill=(30, 41, 59, 255),
+        outline=(59, 130, 246, 255),
+        width=3,
+    )
+    draw.text((center_x - 14, center_y - 10), "VS", fill=(255, 255, 255, 255))
+
+    # 2. Logo Liga (Atas Tengah, max 160x100)
+    league_img = download_image(league_logo_url)
+    if league_img:
+        league_img.thumbnail((160, 100), Image.Resampling.LANCZOS)
+        lx = (width - league_img.width) // 2
+        canvas.paste(league_img, (lx, 35), league_img)
+
+    # 3. Logo Tim Kandang (Kiri, max 300x300)
+    home_img = download_image(home_logo_url)
+    if home_img:
+        home_img.thumbnail((300, 300), Image.Resampling.LANCZOS)
+        hx = 200 + (300 - home_img.width) // 2
+        hy = center_y - (home_img.height // 2)
+        canvas.paste(home_img, (hx, hy), home_img)
+
+    # 4. Logo Tim Tandang (Kanan, max 300x300)
+    away_img = download_image(away_logo_url)
+    if away_img:
+        away_img.thumbnail((300, 300), Image.Resampling.LANCZOS)
+        ax = (width - 200 - 300) + (300 - away_img.width) // 2
+        ay = center_y - (away_img.height // 2)
+        canvas.paste(away_img, (ax, ay), away_img)
+
+    canvas.save(local_path, format="PNG")
+    return local_path
+
+
 # ================================================================
 # RISOLUZIONE TOKEN
 # ================================================================
@@ -94,9 +167,7 @@ def resolve_m3u8(player_url: str):
 
     for attempt in range(RETRIES):
         try:
-            r = requests.get(player_url, headers=HEADERS,
-                             timeout=TIMEOUT, verify=False)
-
+            r = requests.get(player_url, headers=HEADERS, timeout=TIMEOUT, verify=False)
             if r.status_code in (429, 502, 503):
                 time.sleep((2 ** attempt) * BACKOFF_BASE + random.uniform(0, 2))
                 last_err = f"HTTP {r.status_code}"
@@ -119,15 +190,10 @@ def resolve_m3u8(player_url: str):
                 _resolve_cache[player_url] = result
                 return result
 
-            args = re.findall(
-                r"[A-Za-z_$][\w$]*\(([A-Za-z_$][\w$]*)\)", join_match.group(1)
-            )
-            vars_dict = dict(re.findall(
-                r"var\s+([A-Za-z_$][\w$]*)\s*=\s*'([^']*)'", html
-            ))
+            args = re.findall(r"[A-Za-z_$][\w$]*\(([A-Za-z_$][\w$]*)\)", join_match.group(1))
+            vars_dict = dict(re.findall(r"var\s+([A-Za-z_$][\w$]*)\s*=\s*'([^']*)'", html))
 
-            parts = [b64d(vars_dict[a]).decode("utf-8", errors="replace")
-                     for a in args if a in vars_dict]
+            parts = [b64d(vars_dict[a]).decode("utf-8", errors="replace") for a in args if a in vars_dict]
             url = "".join(parts)
 
             result = (url, None) if url.startswith("http") else (None, "url malformato")
@@ -164,20 +230,79 @@ def process_event_item(event: dict, sport: str) -> list:
     country = event.get("country") or ""
     status = (event.get("status") or "").lower()
 
+    # Ekstraksi Waktu / Jam
+    raw_date = event.get("date") or event.get("start_date") or ""
+    raw_time = event.get("time") or event.get("start_time") or ""
+    timestamp = event.get("timestamp") or event.get("start_timestamp") or event.get("time_utc")
+
+    time_str = ""
+    if timestamp:
+        try:
+            ts = int(timestamp)
+            if ts > 10_000_000_000:
+                ts = ts // 1000
+            # Konversi otomatis ke WIB (UTC+7)
+            wib_time = datetime.fromtimestamp(ts, tz=timezone.utc) + timedelta(hours=7)
+            time_str = wib_time.strftime("%d/%m %H:%M WIB")
+        except Exception:
+            pass
+
+    if not time_str and (raw_time or raw_date):
+        parts = [p for p in (raw_date, raw_time) if p]
+        time_str = " ".join(parts)
+
+    # Ekstraksi Logo untuk Thumbnail Komposit
+    home_logo = (
+        event.get("home_logo")
+        or event.get("team_home_badge")
+        or event.get("team_a_logo")
+        or (event.get("home_team", {}).get("logo") if isinstance(event.get("home_team"), dict) else "")
+        or ""
+    )
+    away_logo = (
+        event.get("away_logo")
+        or event.get("team_away_badge")
+        or event.get("team_b_logo")
+        or (event.get("away_team", {}).get("logo") if isinstance(event.get("away_team"), dict) else "")
+        or ""
+    )
+    league_logo = event.get("tournament_logo") or event.get("league_logo") or ""
+    event_id = str(event.get("id") or re.sub(r"[^a-zA-Z0-9]", "_", title)[:30])
+
+    composite_thumb_url = ""
+    if home_logo or away_logo:
+        local_img = create_match_thumbnail(home_logo, away_logo, league_logo, event_id)
+        if local_img and GITHUB_REPO:
+            composite_thumb_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{local_img}"
+
     if EVENTS_ONLY_LIVE and status not in ("in", "live", "playing"):
         return out
+
+    prefix_time = f"[{time_str}] " if time_str else ""
 
     for ch in event.get("channels", []) or []:
         ch_name = ch.get("channel_name", "")
         ch_url = ch.get("url", "")
         if not ch_url:
             continue
-        full_name = f"{title} - {ch_name}" if ch_name else title
+
+        full_name = f"{prefix_time}{title} - {ch_name}" if ch_name else f"{prefix_time}{title}"
         url, err = resolve_m3u8(ch_url)
+
+        # Gunakan thumbnail gabungan jika ada, jika tidak fallback ke logo channel bawaan
+        final_logo = composite_thumb_url or ch.get("image", "")
+
         out.append({
-            "name": full_name, "title": title, "league": league,
-            "country": country, "code": ch.get("channel_code", ""),
-            "img": ch.get("image", ""), "url": url, "err": err, "sport": sport,
+            "name": full_name,
+            "title": title,
+            "league": league,
+            "country": country,
+            "time_str": time_str,
+            "code": ch.get("channel_code", ""),
+            "img": final_logo,
+            "url": url,
+            "err": err,
+            "sport": sport,
         })
     return out
 
@@ -191,7 +316,7 @@ def fetch_api(url: str, label: str):
             r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, verify=False)
             if r.status_code in (429, 502, 503):
                 wait = (2 ** attempt) * BACKOFF_BASE + random.uniform(0, 2)
-                print(f"  ⏸️ {label} HTTP {r.status_code}, attendo {wait:.1f}s...")
+                print(f"  ⏸️ {label} HTTP {r.status_code}, wait {wait:.1f}s...")
                 time.sleep(wait)
                 continue
             r.raise_for_status()
@@ -207,14 +332,12 @@ def fetch_api(url: str, label: str):
 # ================================================================
 def main():
     print("=" * 60)
-    print(" CDN Live TV - Extractor v3 (Soccer only)")
-    print(f" Workers: {MAX_WORKERS} | Jitter: {JITTER_MIN}-{JITTER_MAX}s")
-    if ONLY_SPORT:
-        print(f" Filtro sport: {ONLY_SPORT}")
+    print(" CDN Live TV - Duda Extractor with Composite Thumbnails")
+    print(f" Workers: {MAX_WORKERS} | Target Sport: {ONLY_SPORT}")
     print("=" * 60)
 
     # ============ FASE 1: EVENTI ============
-    print(f"\n[1/2] Scarico API eventi sport...")
+    print("\n[1/2] Fetching sports events API...")
     data_ev = fetch_api(API_EVENTS, "API eventi")
 
     results_ev_raw = []
@@ -229,71 +352,50 @@ def main():
             for ev in evs:
                 all_events.append((sport, ev))
 
-        print(f"✓ {len(all_events)} eventi" +
-              (f" (solo {ONLY_SPORT})" if ONLY_SPORT else ""))
+        print(f"✓ {len(all_events)} events found.")
 
         if all_events:
-            est_sec = len(all_events) * ((JITTER_MIN + JITTER_MAX) / 2) / MAX_WORKERS
-            print(f"⏱️  Stima: ~{est_sec/60:.0f} min")
-
-            t0 = time.time()
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-                futures = [ex.submit(process_event_item, ev, sp)
-                           for sp, ev in all_events]
+                futures = [ex.submit(process_event_item, ev, sp) for sp, ev in all_events]
                 done = 0
-                ok_total = 0
-                last_log = 0
                 for fut in as_completed(futures):
                     try:
                         chunk = fut.result()
                         results_ev_raw.extend(chunk)
-                        ok_total += sum(1 for r in chunk if r.get("url"))
                     except Exception:
                         pass
                     done += 1
-                    now = time.time()
-                    if done % 100 == 0 or (now - last_log) > 30:
-                        elapsed = now - t0
-                        rate = done / elapsed if elapsed > 0 else 0
-                        eta = (len(all_events) - done) / rate if rate > 0 else 0
-                        print(f"  [{done}/{len(all_events)}] "
-                              f"OK: {ok_total} | {elapsed:.0f}s | ETA {eta:.0f}s")
-                        last_log = now
+                    if done % 20 == 0 or done == len(all_events):
+                        print(f"  Processed {done}/{len(all_events)} events...")
 
     # ============ PAUSA ============
-    print(f"\n⏸️  Pausa {PAUSE_BETWEEN_PHASES}s...")
+    print(f"\n⏸️ Pause {PAUSE_BETWEEN_PHASES}s...")
     time.sleep(PAUSE_BETWEEN_PHASES)
 
     # ============ FASE 2: CANALI ============
-    print(f"\n[2/2] Scarico API canali TV...")
+    print("\n[2/2] Fetching TV channels API...")
     data_ch = fetch_api(API_CHANNELS, "API canali")
 
     channels = []
     if data_ch:
         channels = data_ch.get("channels", [])
-        print(f"✓ {data_ch.get('total_channels', len(channels))} canali ricevuti")
+        print(f"✓ {len(channels)} channels found.")
 
     if MAX_CHANNELS > 0:
         channels = channels[:MAX_CHANNELS]
 
     results_tv = []
     if channels:
-        print(f"Elaboro {len(channels)} canali...")
-        t0 = time.time()
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
             futures = [ex.submit(process_channel, ch) for ch in channels]
             done = 0
-            last_log = 0
             for fut in as_completed(futures):
                 results_tv.append(fut.result())
                 done += 1
-                now = time.time()
-                if done % 50 == 0 or (now - last_log) > 30 or done == len(channels):
-                    ok = sum(1 for r in results_tv if r["url"])
-                    print(f"  [{done}/{len(channels)}] OK: {ok}  ({now-t0:.0f}s)")
-                    last_log = now
+                if done % 50 == 0 or done == len(channels):
+                    print(f"  Processed {done}/{len(channels)} channels...")
 
-    # ============ DEDUPLICA ============
+    # ============ DEDUPLIKASI EVENT ============
     seen_titles = set()
     results_ev = []
     for r in results_ev_raw:
@@ -312,8 +414,7 @@ def main():
         for r in tv_ok:
             tvg_id = f' tvg-id="{r["code"]}"' if r["code"] else ""
             logo = f' tvg-logo="{r["img"]}"' if r["img"] else ""
-            f.write(f'#EXTINF:-1{tvg_id}{logo} '
-                    f'group-title="CDN Live TV Channels",{r["name"]}\n')
+            f.write(f'#EXTINF:-1{tvg_id}{logo} group-title="CDN Live TV Channels",{r["name"]}\n')
             f.write(f'{r["url"]}\n')
 
     with open(EVENTS_OUTPUT, "w", encoding="utf-8") as f:
@@ -321,14 +422,14 @@ def main():
         for r in results_ev:
             tvg_id = f' tvg-id="{r["code"]}"' if r.get("code") else ""
             logo = f' tvg-logo="{r["img"]}"' if r.get("img") else ""
+            event_time = f' tvg-time="{r["time_str"]}"' if r.get("time_str") else ""
             sport = r.get("sport", "Sport")
-            f.write(f'#EXTINF:-1{tvg_id}{logo} '
-                    f'group-title="CDN Live TV Events - {sport}",{r["name"]}\n')
+            f.write(f'#EXTINF:-1{tvg_id}{logo}{event_time} group-title="CDN Live TV Events - {sport}",{r["name"]}\n')
             f.write(f'{r["url"]}\n')
 
-    print(f"\n✅ Canali TV OK:    {len(tv_ok)}/{len(results_tv)}")
-    print(f"✅ Eventi unici OK: {len(results_ev)}/{len(results_ev_raw)}")
-    print(f"📄 {CHANNELS_OUTPUT} | {EVENTS_OUTPUT}")
+    print(f"\n✅ TV Channels OK: {len(tv_ok)}/{len(results_tv)}")
+    print(f"✅ Unique Events OK: {len(results_ev)}/{len(results_ev_raw)}")
+    print(f"📄 Generated: {CHANNELS_OUTPUT} & {EVENTS_OUTPUT}")
 
 
 if __name__ == "__main__":
