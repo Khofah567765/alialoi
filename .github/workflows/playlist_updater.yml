@@ -27,20 +27,23 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests pillow urllib3
 
       # ============================================================
       # JALANKAN DUDA.PY
       # ============================================================
       - name: Run duda.py
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python duda.py
 
       # ============================================================
       # COMMIT & PUSH HASIL KE REPOSITORI
       # ============================================================
-      - name: Commit and push generated M3U
+      - name: Commit and push generated M3U & Thumbnails
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Update M3U playlist from duda.py"
-          # Pola '*.m3u' otomatis melacak file .m3u apa pun yang dihasilkan script
-          file_pattern: "*.m3u"
+          commit_message: "Update M3U playlist and generated thumbnails"
+          file_pattern: >-
+            *.m3u
+            thumbnails/*.png
