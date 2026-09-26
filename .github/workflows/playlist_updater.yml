@@ -4,7 +4,7 @@ on:
   schedule:
     # Berjalan otomatis setiap jam pada menit ke-42
     - cron: "42 * * * *"
-  # Pemicu manual dari tab Actions
+  # Pemicu manual dari tab Actions di GitHub
   workflow_dispatch:
 
 permissions:
@@ -29,6 +29,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pillow urllib3
 
+      # Memastikan folder thumbnails selalu ada dengan file placeholder
+      - name: Ensure thumbnails directory exists
+        run: |
+          mkdir -p thumbnails
+          touch thumbnails/.gitkeep
+
       # ============================================================
       # JALANKAN DUDA.PY
       # ============================================================
@@ -37,6 +43,14 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python duda.py
 
+      # Cek file apa saja yang berubah sebelum commit
+      - name: Check Git status
+        run: |
+          echo "=== Status File Git ==="
+          git status --short
+          echo "=== Isi Folder Thumbnails ==="
+          ls -la thumbnails
+
       # ============================================================
       # COMMIT & PUSH HASIL KE REPOSITORI
       # ============================================================
@@ -44,7 +58,5 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update M3U playlist and generated thumbnails"
-          file_pattern: >-
-            *.m3u
-            thumbnails/*.png
-          add_options: '--ignore-missing'
+          file_pattern: "*.m3u thumbnails"
+          add_options: "--ignore-missing"
