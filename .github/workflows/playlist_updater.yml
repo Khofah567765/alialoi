@@ -29,7 +29,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests pillow urllib3
 
-      # Memastikan folder thumbnails selalu ada dengan file placeholder
+      # Memastikan folder thumbnails selalu ada dengan placeholder
       - name: Ensure thumbnails directory exists
         run: |
           mkdir -p thumbnails
@@ -43,7 +43,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python duda.py
 
-      # Cek file apa saja yang berubah sebelum commit
+      # Cek file yang berubah sebelum commit
       - name: Check Git status
         run: |
           echo "=== Status File Git ==="
@@ -58,5 +58,4 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Update M3U playlist and generated thumbnails"
-          file_pattern: "*.m3u thumbnails"
-          add_options: "--ignore-missing"
+          file_pattern: "*.m3u thumbnails/*"
