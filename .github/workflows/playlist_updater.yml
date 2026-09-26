@@ -47,3 +47,4 @@ jobs:
           file_pattern: >-
             *.m3u
             thumbnails/*.png
+          add_options: '--ignore-missing'
