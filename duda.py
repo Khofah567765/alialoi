@@ -10,7 +10,6 @@ import base64
 import time
 import random
 import unicodedata
-from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -27,7 +26,7 @@ CHANNELS_OUTPUT = "cdnlivetv_channels.m3u"
 EVENTS_OUTPUT = "cdnlivetv_events.m3u"
 THUMBNAILS_DIR = "thumbnails"
 
-# Deteksi username/repo otomatis dari environment GitHub Actions
+# Deteksi username/repo otomatis dari GitHub Actions
 GITHUB_REPO = os.getenv("GITHUB_REPOSITORY", "")
 
 # --- SOLO CALCIO ---
@@ -102,7 +101,7 @@ def download_image(url: str) -> Image.Image | None:
     return None
 
 
-def create_match_thumbnail(home_logo_url: str, away_logo_url: str, league_logo_url: str, match_id: str) -> str:
+def create_match_thumbnail(home_logo_url: str, away_logo_url: str, flag_logo_url: str, match_id: str) -> str:
     safe_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(match_id))[:40]
     filename = f"{safe_id}.png"
     local_path = os.path.join(THUMBNAILS_DIR, filename)
@@ -110,7 +109,7 @@ def create_match_thumbnail(home_logo_url: str, away_logo_url: str, league_logo_u
     if os.path.exists(local_path):
         return local_path
 
-    # Resolusi dasar HD 16:9
+    # Canvas dasar HD 16:9
     width, height = 1280, 720
     canvas = Image.new("RGBA", (width, height), (15, 23, 42, 255))
     draw = ImageDraw.Draw(canvas)
@@ -126,12 +125,12 @@ def create_match_thumbnail(home_logo_url: str, away_logo_url: str, league_logo_u
     )
     draw.text((center_x - 14, center_y - 10), "VS", fill=(255, 255, 255, 255))
 
-    # 2. Logo Liga (Atas Tengah, max 160x100)
-    league_img = download_image(league_logo_url)
-    if league_img:
-        league_img.thumbnail((160, 100), Image.Resampling.LANCZOS)
-        lx = (width - league_img.width) // 2
-        canvas.paste(league_img, (lx, 35), league_img)
+    # 2. Logo Bendera / Turnamen (Atas Tengah, max 120x80)
+    flag_img = download_image(flag_logo_url)
+    if flag_img:
+        flag_img.thumbnail((120, 80), Image.Resampling.LANCZOS)
+        lx = (width - flag_img.width) // 2
+        canvas.paste(flag_img, (lx, 40), flag_img)
 
     # 3. Logo Tim Kandang (Kiri, max 300x300)
     home_img = download_image(home_logo_url)
@@ -150,6 +149,7 @@ def create_match_thumbnail(home_logo_url: str, away_logo_url: str, league_logo_u
         canvas.paste(away_img, (ax, ay), away_img)
 
     canvas.save(local_path, format="PNG")
+    print(f"  🎨 Thumbnail dibuat: {filename}")
     return local_path
 
 
@@ -225,53 +225,28 @@ def process_channel(ch: dict) -> dict:
 
 def process_event_item(event: dict, sport: str) -> list:
     out = []
-    title = event.get("event") or event.get("title") or "Evento"
-    league = event.get("tournament") or event.get("league") or ""
+    title = event.get("event") or f"{event.get('homeTeam', '')} vs {event.get('awayTeam', '')}".strip() or "Evento"
+    league = event.get("tournament") or ""
     country = event.get("country") or ""
     status = (event.get("status") or "").lower()
 
-    # Ekstraksi Waktu / Jam
-    raw_date = event.get("date") or event.get("start_date") or ""
-    raw_time = event.get("time") or event.get("start_time") or ""
-    timestamp = event.get("timestamp") or event.get("start_timestamp") or event.get("time_utc")
+    # Ekstraksi Jam dan Waktu langsung dari key API
+    time_str = event.get("time") or ""
+    if not time_str and event.get("start"):
+        # Format start: "2026-09-26 15:00" -> ambil "15:00"
+        parts = event.get("start", "").split(" ")
+        if len(parts) > 1:
+            time_str = parts[1]
 
-    time_str = ""
-    if timestamp:
-        try:
-            ts = int(timestamp)
-            if ts > 10_000_000_000:
-                ts = ts // 1000
-            # Konversi otomatis ke WIB (UTC+7)
-            wib_time = datetime.fromtimestamp(ts, tz=timezone.utc) + timedelta(hours=7)
-            time_str = wib_time.strftime("%d/%m %H:%M WIB")
-        except Exception:
-            pass
-
-    if not time_str and (raw_time or raw_date):
-        parts = [p for p in (raw_date, raw_time) if p]
-        time_str = " ".join(parts)
-
-    # Ekstraksi Logo untuk Thumbnail Komposit
-    home_logo = (
-        event.get("home_logo")
-        or event.get("team_home_badge")
-        or event.get("team_a_logo")
-        or (event.get("home_team", {}).get("logo") if isinstance(event.get("home_team"), dict) else "")
-        or ""
-    )
-    away_logo = (
-        event.get("away_logo")
-        or event.get("team_away_badge")
-        or event.get("team_b_logo")
-        or (event.get("away_team", {}).get("logo") if isinstance(event.get("away_team"), dict) else "")
-        or ""
-    )
-    league_logo = event.get("tournament_logo") or event.get("league_logo") or ""
-    event_id = str(event.get("id") or re.sub(r"[^a-zA-Z0-9]", "_", title)[:30])
+    # Ekstraksi Logo Sesuai Format API
+    home_logo = event.get("homeTeamIMG") or ""
+    away_logo = event.get("awayTeamIMG") or ""
+    flag_logo = event.get("countryIMG") or ""
+    game_id = str(event.get("gameID") or re.sub(r"[^a-zA-Z0-9]", "_", title)[:30])
 
     composite_thumb_url = ""
     if home_logo or away_logo:
-        local_img = create_match_thumbnail(home_logo, away_logo, league_logo, event_id)
+        local_img = create_match_thumbnail(home_logo, away_logo, flag_logo, game_id)
         if local_img and GITHUB_REPO:
             composite_thumb_url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{local_img}"
 
@@ -289,7 +264,7 @@ def process_event_item(event: dict, sport: str) -> list:
         full_name = f"{prefix_time}{title} - {ch_name}" if ch_name else f"{prefix_time}{title}"
         url, err = resolve_m3u8(ch_url)
 
-        # Gunakan thumbnail gabungan jika ada, jika tidak fallback ke logo channel bawaan
+        # Prioritas logo: Thumbnail komposit VS > logo channel bawaan
         final_logo = composite_thumb_url or ch.get("image", "")
 
         out.append({
@@ -365,7 +340,7 @@ def main():
                     except Exception:
                         pass
                     done += 1
-                    if done % 20 == 0 or done == len(all_events):
+                    if done % 10 == 0 or done == len(all_events):
                         print(f"  Processed {done}/{len(all_events)} events...")
 
     # ============ PAUSA ============
@@ -395,7 +370,7 @@ def main():
                 if done % 50 == 0 or done == len(channels):
                     print(f"  Processed {done}/{len(channels)} channels...")
 
-    # ============ DEDUPLIKASI EVENT ============
+    # ============ DEDUPLIKASI ============
     seen_titles = set()
     results_ev = []
     for r in results_ev_raw:
