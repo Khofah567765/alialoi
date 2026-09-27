@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ================================================================
-# duda.py - CDN Live TV Extractor (Soccer only + Composite Thumbnails)
+# duda.py - CDN Live TV Extractor (Soccer only + Composite Thumbnails + WIB Time)
 # ================================================================
 
 import os
@@ -10,6 +10,7 @@ import base64
 import time
 import random
 import unicodedata
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -59,7 +60,7 @@ os.makedirs(THUMBNAILS_DIR, exist_ok=True)
 
 
 # ================================================================
-# UTILITY & THUMBNAIL GENERATOR
+# UTILITY & TIME CONVERTER
 # ================================================================
 def b64d(s: str) -> bytes:
     s = s.replace("-", "+").replace("_", "/")
@@ -68,6 +69,32 @@ def b64d(s: str) -> bytes:
         return base64.b64decode(s)
     except Exception:
         return b""
+
+
+def convert_to_wib(start_str: str, time_str: str = "") -> str:
+    """
+    Mengonversi waktu UTC dari API menjadi Waktu Indonesia Barat (WIB / UTC+7).
+    Contoh:
+      - '2026-09-26 15:00' -> '22:00 WIB'
+      - '15:00'           -> '22:00 WIB'
+    """
+    try:
+        # Coba parse tanggal dan waktu penuh (YYYY-MM-DD HH:MM)
+        if start_str and len(start_str.strip()) >= 16:
+            dt_utc = datetime.strptime(start_str.strip()[:16], "%Y-%m-%d %H:%M")
+            dt_wib = dt_utc + timedelta(hours=7)
+            return dt_wib.strftime("%H:%M WIB")
+
+        # Fallback jika hanya ada format HH:MM
+        if time_str and ":" in time_str:
+            parts = time_str.strip().split(":")
+            hour_wib = (int(parts[0]) + 7) % 24
+            minute = parts[1]
+            return f"{hour_wib:02d}:{minute} WIB"
+    except Exception:
+        pass
+
+    return time_str or ""
 
 
 def normalize_event_name(name: str) -> str:
@@ -230,13 +257,10 @@ def process_event_item(event: dict, sport: str) -> list:
     country = event.get("country") or ""
     status = (event.get("status") or "").lower()
 
-    # Ekstraksi Jam dan Waktu langsung dari key API
-    time_str = event.get("time") or ""
-    if not time_str and event.get("start"):
-        # Format start: "2026-09-26 15:00" -> ambil "15:00"
-        parts = event.get("start", "").split(" ")
-        if len(parts) > 1:
-            time_str = parts[1]
+    # Ekstraksi dan konversi jam ke format WIB
+    raw_start = event.get("start") or ""
+    raw_time = event.get("time") or ""
+    time_str = convert_to_wib(raw_start, raw_time)
 
     # Ekstraksi Logo Sesuai Format API
     home_logo = event.get("homeTeamIMG") or ""
